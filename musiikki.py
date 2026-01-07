@@ -3,6 +3,7 @@ import numpy as np
 from scipy.io import wavfile
 import io
 import re
+import random
 
 # Sivun asetukset
 st.set_page_config(page_title="GEDCOM Musiikkigeneraattori", layout="centered")
@@ -10,12 +11,11 @@ st.set_page_config(page_title="GEDCOM Musiikkigeneraattori", layout="centered")
 st.title("🎵 GEDCOM-tiedosto musiikiksi")
 st.write("""
 Tämä sovellus lukee GEDCOM-tiedoston päivämäärät ja muuttaa ne musiikiksi.
-**Logiikka:** Tammikuu = C, Helmikuu = D, jne. Jokaista kuukautta soitetaan 
-niin monta kertaa peräkkäin kuin se esiintyy tiedostossa.
+**Logiikka:** Tammikuu = C, Helmikuu = D, jne.
 """)
 
 # Määritellään taajuudet (C4 = Middle C)
-# C D E F G A B C D E F G (C Major scale)
+# C D E F G A B C D E F G
 NOTE_FREQS = {
     1: 261.63,  # JAN - C4
     2: 293.66,  # FEB - D4
@@ -39,7 +39,6 @@ MONTH_MAP = {
 def parse_gedcom_months(content):
     """Etsii kaikki DATE-rivit ja palauttaa löydetyt kuukaudet listana."""
     months_found = []
-    # Gedcom päivämäärät ovat muotoa: 2 DATE 14 JAN 1900
     # Regex etsii kuukauden lyhenteitä
     pattern = re.compile(r'\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\b', re.IGNORECASE)
     
@@ -56,7 +55,7 @@ def generate_sine_wave(freq, duration, sample_rate=44100, amplitude=0.5):
     t = np.linspace(0, duration, int(sample_rate * duration), False)
     wave = amplitude * np.sin(2 * np.pi * freq * t)
     
-    # Lisätään pieni "envelope" (fade in/out) naksahdusten estämiseksi
+    # Envelope naksahdusten estämiseksi
     envelope_len = int(sample_rate * 0.01) # 10ms
     if len(wave) > 2 * envelope_len:
         wave[:envelope_len] *= np.linspace(0, 1, envelope_len)
@@ -68,68 +67,84 @@ def generate_sine_wave(freq, duration, sample_rate=44100, amplitude=0.5):
 uploaded_file = st.file_uploader("Lataa GEDCOM-tiedosto (.ged)", type=['ged'])
 
 # Asetukset
+st.subheader("Asetukset")
 col1, col2 = st.columns(2)
 with col1:
-    note_duration = st.slider("Nuotin kesto (sekuntia)", 0.05, 0.5, 0.1, 0.05)
-with col2:
+    note_duration = st.slider("Nuotin kesto (sekuntia)", 0.05, 0.5, 0.15, 0.05)
     volume = st.slider("Äänenvoimakkuus", 0.1, 1.0, 0.5)
+with col2:
+    # UUSI VALINTA: Soittojärjestys
+    play_mode = st.radio(
+        "Soittojärjestys",
+        ("Kronologinen (Tammi -> Joulu)", "Satunnainen sekoitus")
+    )
 
 if uploaded_file is not None:
     # Luetaan tiedosto
     content = uploaded_file.getvalue().decode("utf-8", errors='ignore')
     
     with st.spinner('Analysoidaan sukupuuta...'):
-        months = parse_gedcom_months(content)
+        # Tämä lista sisältää kaikki löydetyt kuukaudet (esim. [1, 5, 2, 1, 12...])
+        raw_months = parse_gedcom_months(content)
         
-        # Lasketaan kuukausien määrät (histogrammi)
+        # Lasketaan tilastoja varten määrät
         month_counts = {i: 0 for i in range(1, 13)}
-        for m in months:
+        for m in raw_months:
             month_counts[m] += 1
             
-    st.success(f"Löydetty yhteensä {len(months)} päivämäärää!")
-    
-    # Näytetään tilastot
+    st.success(f"Löydetty yhteensä {len(raw_months)} päivämäärää!")
     st.bar_chart(month_counts)
     
     with st.spinner('Generoidaan musiikkia...'):
         audio_parts = []
         sample_rate = 44100
         
-        # Luodaan ääni: Käydään läpi kuukaudet 1-12
-        # Soitetaan jokaista kuukautta niin monta kertaa kuin se löytyi
-        for m in range(1, 13):
-            count = month_counts[m]
-            freq = NOTE_FREQS[m]
+        # LOGIIKKA ÄÄNEN LUOMISEEN
+        
+        if "Satunnainen" in play_mode:
+            # 1. SATUNNAINEN TILA
+            # Kopioidaan lista, jotta alkuperäinen ei muutu
+            playlist = raw_months.copy()
+            # Sekoitetaan järjestys
+            random.shuffle(playlist)
             
-            if count > 0:
-                # Luodaan yksi "piippaus" ja toistetaan se count kertaa
-                # Huom: Teemme pienen tauon nuottien väliin (silence)
+            # Käydään sekoitettu lista läpi nuotti nuotilta
+            for m in playlist:
+                freq = NOTE_FREQS[m]
                 tone = generate_sine_wave(freq, note_duration, sample_rate, volume)
-                silence = np.zeros(int(sample_rate * 0.05)) # 50ms tauko
+                silence = np.zeros(int(sample_rate * 0.05))
+                audio_parts.append(np.concatenate([tone, silence]))
                 
-                # Yhdistetään nuotti + tauko yhdeksi paketiksi
-                note_sequence = np.concatenate([tone, silence])
+        else:
+            # 2. KRONOLOGINEN TILA (Tammi -> Joulu)
+            # Soitetaan ryhmittäin
+            for m in range(1, 13):
+                count = month_counts[m]
+                freq = NOTE_FREQS[m]
                 
-                # Toistetaan pakettia 'count' kertaa
-                month_sequence = np.tile(note_sequence, count)
-                audio_parts.append(month_sequence)
+                if count > 0:
+                    tone = generate_sine_wave(freq, note_duration, sample_rate, volume)
+                    silence = np.zeros(int(sample_rate * 0.05))
+                    note_sequence = np.concatenate([tone, silence])
+                    # Toistetaan samaa nuottia 'count' kertaa
+                    month_sequence = np.tile(note_sequence, count)
+                    audio_parts.append(month_sequence)
         
         if audio_parts:
             full_audio = np.concatenate(audio_parts)
             
-            # Normalisointi ja muunnos 16-bit PCM muotoon
+            # Normalisointi
             full_audio = full_audio / np.max(np.abs(full_audio)) * 32767
             full_audio = full_audio.astype(np.int16)
             
-            # Kirjoitetaan virtuaaliseen tiedostoon
             wav_buffer = io.BytesIO()
             wavfile.write(wav_buffer, sample_rate, full_audio)
             
-            # Soitin
             st.audio(wav_buffer, format='audio/wav')
             
-            st.write("### Selite:")
-            st.write("Matalimmat äänet ovat alkuvuodesta (Tammikuu = C), korkeimmat loppuvuodesta (Joulukuu = G).")
-            st.write("Mitä pidempään sama sävel soi, sitä enemmän tapahtumia kyseisessä kuussa on.")
+            if "Satunnainen" in play_mode:
+                st.info("💡 Nyt kuulet kaikki tiedoston kuukaudet satunnaisessa järjestyksessä. Melodia vaihtelee jatkuvasti.")
+            else:
+                st.info("💡 Nyt kuulet kuukaudet järjestyksessä tammikuusta joulukuuhun. Saman kuukauden toistot kuuluvat peräkkäin.")
         else:
             st.warning("Tiedostosta ei löytynyt tunnistettavia päivämääriä.")
